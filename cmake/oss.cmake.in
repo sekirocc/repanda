@@ -1,0 +1,153 @@
+cmake_minimum_required(VERSION 3.12.0)
+
+project(build-deps NONE)
+
+cmake_host_system_information(
+  RESULT build_concurrency_factor
+  QUERY NUMBER_OF_LOGICAL_CORES)
+
+include(ExternalProject)
+
+set(c_flags "@BASE_C_FLAGS@ @CMAKE_C_FLAGS_BUILD_TYPE@")
+set(cxx_flags "@BASE_CXX_FLAGS@ @CMAKE_CXX_FLAGS_BUILD_TYPE@ -std=c++20")
+set(ld_flags "@BASE_LD_FLAGS@")
+set(default_depends "")
+
+
+if ("@CMAKE_CXX_COMPILER_ID@" MATCHES "Clang")
+    set(toolset clang)
+    set(boost_user_config_jam "using clang : : @CMAKE_CXX_COMPILER@ $<SEMICOLON>")
+elseif (@CMAKE_CXX_COMPILER_ID@ STREQUAL "GNU")
+    set(toolset gcc)
+    set(boost_user_config_jam "using gcc : : @CMAKE_CXX_COMPILER@ : $<SEMICOLON>")
+endif()
+
+
+
+# There is a known issue with ExternalProject_Add's handling of list arguments.
+# ref: https://public.kitware.com/Bug/view.php?id=16137
+# Expected way to pass lists is by replacing ; separtor with a custom separator
+# and the passing it via LIST_SEPARATOR param.
+string (REPLACE ";" "|" CMAKE_C_COMPILER_LAUNCHER_STR "@CMAKE_C_COMPILER_LAUNCHER@")
+string (REPLACE ";" "|" CMAKE_CXX_COMPILER_LAUNCHER_STR "@CMAKE_CXX_COMPILER_LAUNCHER@")
+
+set(common_cmake_args
+  -DCMAKE_CXX_STANDARD=@CMAKE_CXX_STANDARD@
+  -DCMAKE_CXX_EXTENSIONS=@CMAKE_CXX_EXTENSIONS@
+  -DCMAKE_C_COMPILER=@CMAKE_C_COMPILER@
+  -DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@
+  -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER_STR}
+  -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER_STR}
+  "-DCMAKE_C_FLAGS=@BASE_C_FLAGS@"
+  "-DCMAKE_C_FLAGS_@BUILD_TYPE@=@CMAKE_C_FLAGS_BUILD_TYPE@"
+  "-DCMAKE_CXX_FLAGS=@BASE_CXX_FLAGS@ -std=c++20"
+  "-DCMAKE_CXX_FLAGS_@BUILD_TYPE@=@CMAKE_CXX_FLAGS_BUILD_TYPE@"
+  "-DCMAKE_EXE_LINKER_FLAGS=@CMAKE_EXE_LINKER_FLAGS@"
+  "-DCMAKE_SHARED_LINKER_FLAGS=@CMAKE_SHARED_LINKER_FLAGS@"
+  "-DCMAKE_MODULE_LINKER_FLAGS=@CMAKE_MODULE_LINKER_FLAGS@"
+  -DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@
+  -DCMAKE_PREFIX_PATH=@BIGPANDA_DEPS_INSTALL_DIR@
+  -DCMAKE_INSTALL_PREFIX=@BIGPANDA_DEPS_INSTALL_DIR@
+  -DCMAKE_INSTALL_RPATH=@BIGPANDA_DEPS_INSTALL_DIR@/lib
+  -DCMAKE_SKIP_BUILD_RPATH=OFF
+  -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+  -DCMAKE_POSITION_INDEPENDENT_CODE=@CMAKE_POSITION_INDEPENDENT_CODE@
+  -DCMAKE_VERBOSE_MAKEFILE=@CMAKE_VERBOSE_MAKEFILE@
+)
+
+# pkgconfig
+set(ENV{PKG_CONFIG_PATH}  @PKG_CONFIG_PATH@)
+set(cmake_build_env)
+
+if (@CMAKE_CXX_COMPILER_ID@ MATCHES "GNU")
+  set(seastar_ld_flags "${ld_flags} -pthread")
+  set(seastar_cxx_flags "-Wno-error$<SEMICOLON>-fcoroutines")
+else()
+  set(seastar_cxx_flags "-Wno-error")
+endif()
+
+
+ExternalProject_Add(boost
+  # Boost outcome is only installed on boost 1.70.0+
+  URL https://boostorg.jfrog.io/artifactory/main/release/1.75.0/source/boost_1_75_0.tar.gz
+  URL_MD5 38813f6feb40387dfe90160debd71251
+  INSTALL_DIR    @BIGPANDA_DEPS_INSTALL_DIR@
+  PATCH_COMMAND
+    ./bootstrap.sh
+    --prefix=@BIGPANDA_DEPS_INSTALL_DIR@
+    --with-libraries=atomic,chrono,date_time,filesystem,iostreams,program_options,regex,system,test,thread
+    &&
+    echo
+    "${boost_user_config_jam}"
+    > <SOURCE_DIR>/tools/build/src/user-config.jam
+  CONFIGURE_COMMAND ""
+  BUILD_COMMAND ""
+  DEPENDS ${default_depends}
+  INSTALL_COMMAND
+    ${CMAKE_COMMAND} -E chdir <SOURCE_DIR>
+    ./b2
+    -j ${build_concurrency_factor}
+    --toolset=${toolset}
+    --layout=system
+    --build-dir=<BINARY_DIR>
+    install
+    variant=debug
+    cflags=${c_flags}
+    cxxflags=${cxx_flags}
+    linkflags=${ld_flags}
+    link=shared
+    threading=multi
+    hardcode-dll-paths=true
+    dll-path=@BIGPANDA_DEPS_INSTALL_DIR@/lib)
+
+ExternalProject_Add(cryptopp
+  URL https://github.com/weidai11/cryptopp/archive/refs/tags/CRYPTOPP_8_5_0.tar.gz
+  URL_MD5 5968e6014dc6ae5199e3987fb39cf8d3
+  PATCH_COMMAND
+    COMMAND curl -s -o CMakeLists.txt https://raw.githubusercontent.com/noloader/cryptopp-cmake/CRYPTOPP_8_5_0/CMakeLists.txt
+    COMMAND curl -s -o cryptopp-config.cmake https://raw.githubusercontent.com/noloader/cryptopp-cmake/CRYPTOPP_8_5_0/cryptopp-config.cmake
+  INSTALL_DIR @BIGPANDA_DEPS_INSTALL_DIR@
+  CMAKE_COMMAND ${CMAKE_COMMAND} -E env ${cmake_build_env} ${CMAKE_COMMAND}
+  DEPENDS ${default_depends}
+  LIST_SEPARATOR |
+  CMAKE_ARGS
+     ${common_cmake_args}
+    -DBUILD_TESTING=OFF)
+
+ExternalProject_Add(fmt
+  URL https://github.com/fmtlib/fmt/archive/refs/tags/8.1.1.tar.gz
+  URL_MD5 fe7f1585844b14c647bd332ad5562832
+  INSTALL_DIR @BIGPANDA_DEPS_INSTALL_DIR@
+  CMAKE_COMMAND ${CMAKE_COMMAND} -E env ${cmake_build_env} ${CMAKE_COMMAND}
+  DEPENDS ${default_depends}
+  LIST_SEPARATOR |
+  CMAKE_ARGS
+     ${common_cmake_args}
+     -DFMT_DOC=OFF
+     -DFMT_TEST=OFF)
+
+ExternalProject_Add(seastar
+  GIT_REPOSITORY https://github.com/redpanda-data/seastar.git
+  GIT_TAG 30d3a28bde08d2228b4e560c173b89fdd94c3f05
+  INSTALL_DIR    @BIGPANDA_DEPS_INSTALL_DIR@
+  CMAKE_COMMAND ${CMAKE_COMMAND} -E env ${cmake_build_env} ${CMAKE_COMMAND}
+  LIST_SEPARATOR |
+  CMAKE_ARGS
+    ${common_cmake_args}
+    -DBoost_USE_STATIC_LIBS=OFF
+    -DBoost_NO_BOOST_CMAKE=ON
+    -DBoost_NO_SYSTEM_PATHS=TRUE
+    -DSeastar_INSTALL=ON
+    -DSeastar_DPDK=OFF
+    -DSeastar_APPS=OFF
+    -DSeastar_DEMOS=OFF
+    -DSeastar_DOCS=OFF
+    -DSeastar_TESTING=OFF
+    -DSeastar_CXX_FLAGS=${seastar_cxx_flags}
+    "-DSeastar_LD_FLAGS=${seastar_ld_flags}"
+    -DSeastar_API_LEVEL=6
+    -DSeastar_CXX_DIALECT=c++20
+    -DSeastar_UNUSED_RESULT_ERROR=ON
+    -Dvalgrind_PC_INCLUDEDIR=<INSTALL_DIR>/include
+  INSTALL_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target install
+  DEPENDS ${default_depends} boost cryptopp)
